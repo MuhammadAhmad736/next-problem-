@@ -36,6 +36,7 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/*": [
       "node_modules/@choewy/yt-dlp/**/*",
+      "node_modules/dasu/**/*",
       "node_modules/ffmpeg-static/**/*",
     ],
     "/api/media/info": scraperRuntimeIncludes,

@@ -1,7 +1,4 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import youtubeDl from "youtube-dl-exec";
 
 type VidlyClient = {
   getInfo: (url: string) => Promise<unknown>;
@@ -12,6 +9,7 @@ type VidlyClient = {
 };
 
 function getVidlyClient(): VidlyClient {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   return require("@raihan07/vidly") as VidlyClient;
 }
 
@@ -121,16 +119,17 @@ export async function downloadWithVidly(
 }
 
 export async function getMediaMetadata(url: string): Promise<MediaMetadata> {
-  const { YT_DLP_BIN_PATH } = require("@choewy/yt-dlp") as {
-    YT_DLP_BIN_PATH: string;
-  };
   const fullUrl = normalizeMediaUrl(url);
-  const { stdout } = await execFileAsync(
-    YT_DLP_BIN_PATH,
-    ["--dump-single-json", "--skip-download", "--no-warnings", "--no-playlist", fullUrl],
-    { maxBuffer: 10 * 1024 * 1024, timeout: 30_000 },
+  const metadata: unknown = await youtubeDl(
+    fullUrl,
+    {
+      dumpSingleJson: true,
+      skipDownload: true,
+      noWarnings: true,
+      noPlaylist: true,
+    },
+    { timeout: 30_000, windowsHide: true },
   );
-  const metadata: unknown = JSON.parse(stdout);
 
   if (typeof metadata !== "object" || metadata === null) {
     throw new Error("Media metadata response is invalid.");

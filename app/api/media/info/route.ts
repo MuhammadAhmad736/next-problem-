@@ -7,6 +7,17 @@ import {
 
 export const runtime = "nodejs";
 
+type YouTubeScraperMetadata = {
+  status?: boolean;
+  id?: string;
+  message?: string;
+  title?: string;
+  duration?: { seconds?: number };
+  thumbnails?: Array<{ quality?: string; url?: string }>;
+  description?: string;
+  channel_title?: string;
+};
+
 export async function GET(request: NextRequest) {
   try {
     // Get URL from query parameters
@@ -64,41 +75,67 @@ export async function GET(request: NextRequest) {
     }
 
     // Load the YouTube scraper only for YouTube requests.
-    const yt = require('@vreden/youtube_scraper');
-    const result = await yt.metadata(url);
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const yt = require('@vreden/youtube_scraper') as {
+      metadata: (videoUrl: string) => Promise<YouTubeScraperMetadata>;
+    };
+    const metadataStartedAt = Date.now();
+    const scraperStartedAt = Date.now();
+    const scraperMetadataPromise = yt.metadata(url).then(
+      (result) => ({ result, elapsedMs: Date.now() - scraperStartedAt }),
+      (error: unknown) => {
+        console.error("YouTube scraper metadata lookup error:", error);
+        return { result: null, elapsedMs: Date.now() - scraperStartedAt };
+      },
+    );
+    const ytDlpStartedAt = Date.now();
+    const ytDlpMetadataPromise = getMediaMetadata(url).then(
+      (metadata) => ({ metadata, elapsedMs: Date.now() - ytDlpStartedAt }),
+      (error: unknown) => {
+        console.error("YouTube yt-dlp metadata lookup error:", error);
+        return { metadata: null, elapsedMs: Date.now() - ytDlpStartedAt };
+      },
+    );
+    const [
+      { result, elapsedMs: scraperMs },
+      { metadata, elapsedMs: ytDlpMs },
+    ] = await Promise.all([
+      scraperMetadataPromise,
+      ytDlpMetadataPromise,
+    ]);
 
-    if (!result?.status || !result.id) {
+    console.info("YouTube metadata lookup timing", {
+      scraperMs,
+      ytDlpMs,
+      totalMs: Date.now() - metadataStartedAt,
+    });
+
+    if ((!result?.status || !result.id) && !metadata?.title) {
       return NextResponse.json(
         {
           success: false,
-          error: "Invalid URL",
+          error: result?.message || "Unable to retrieve YouTube metadata.",
         },
-        { status: 404 }
+        { status: result?.status === false ? 404 : 502 }
       );
     }
 
-    let duration =
-      typeof result.duration?.seconds === "number" &&
+    const duration =
+      typeof result?.duration?.seconds === "number" &&
       Number.isFinite(result.duration.seconds)
         ? Math.max(0, result.duration.seconds)
-        : 0;
-    let title = typeof result.title === "string" ? result.title : "";
-
-    if (duration === 0 || !title) {
-      try {
-        const metadata = await getMediaMetadata(url);
-        if (duration === 0) duration = metadata.duration;
-        if (!title && metadata.title) title = metadata.title;
-      } catch (error) {
-        console.error("Media duration lookup error:", error);
-      }
-    }
+        : metadata?.duration ?? 0;
+    const title =
+      typeof result?.title === "string" && result.title.trim()
+        ? result.title
+        : metadata?.title ?? "";
 
     // Get the best available thumbnail
     const thumbnail =
-      result.thumbnails?.find((item: any) => item.quality === "maxres")?.url ||
-      result.thumbnails?.find((item: any) => item.quality === "high")?.url ||
-      result.thumbnails?.[0]?.url ||
+      result?.thumbnails?.find((item) => item.quality === "maxres")?.url ||
+      result?.thumbnails?.find((item) => item.quality === "high")?.url ||
+      result?.thumbnails?.[0]?.url ||
+      metadata?.thumbnail ||
       "";
 
     // Return only the data our frontend needs
@@ -107,13 +144,13 @@ export async function GET(request: NextRequest) {
 
       data: {
         title,
-        description: result.description || "",
+        description: result?.description || "",
         thumbnail,
         ...(duration > 0 ? { duration } : {}),
         ...(platform ? { platform } : {}),
 
         // YouTube channel/uploader
-        uploader: result.channel_title || "",
+        uploader: result?.channel_title || "",
 
         // metadata() does not provide a reliable file size
         size: null,

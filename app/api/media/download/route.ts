@@ -1,19 +1,27 @@
 import { NextRequest, NextResponse } from 'next/server';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { requireUser } from '@/lib/middleware/require-user';
 import {
+  downloadWithVidly,
   getMediaMetadata,
   getMediaPlatform,
   getVidlyMediaInfo,
 } from '@/lib/downloads/media-metadata';
-import { createFileResponse } from '@/lib/downloads/streamer';
+import { createDirectFileResponse, createFileResponse } from '@/lib/downloads/streamer';
 import type { DownloadTracking, DownloadType } from '@/lib/downloads/types';
 import { createJob, getJob } from '@/lib/downloads/job-store';
 import { runDownloadJob } from '@/lib/downloads/downloader';
-
-const yt = require('@vreden/youtube_scraper');
+import { saveDownloadRecordDetails } from '@/lib/downloads/records';
 
 export const runtime = 'nodejs';
 export const maxDuration = 300;
+
+type YouTubeScraperMetadata = {
+  title?: string;
+};
 
 function isValidType(t: string | null): t is DownloadType {
   return t === 'mp4' || t === 'mp3';
@@ -22,7 +30,8 @@ function isValidType(t: string | null): t is DownloadType {
 async function getDownloadTracking(
   url: string,
   type: DownloadType,
-  userId?: string
+  userId?: string,
+  knownMetadata?: { title?: string; duration?: number },
 ): Promise<DownloadTracking | null> {
   const platform = getMediaPlatform(url);
   if (!platform) return null;
@@ -56,28 +65,57 @@ async function getDownloadTracking(
     };
   }
 
-  let duration = 0;
-  let title = 'Unknown title';
-  try {
-    const fullUrl = url.startsWith('http') ? url : `https://${url}`;
-    const metadata = await yt.metadata(fullUrl);
-    if (typeof metadata?.title === 'string' && metadata.title.trim()) {
-      title = metadata.title.trim();
-    }
-    if (typeof metadata?.duration?.seconds === 'number' && Number.isFinite(metadata.duration.seconds)) {
-      duration = Math.max(0, metadata.duration.seconds);
-    }
-  } catch (error) {
-    console.error('Download metadata lookup error:', error);
-  }
+  let duration = knownMetadata?.duration ?? 0;
+  let title = knownMetadata?.title?.trim() || 'Unknown title';
 
-  if (duration === 0 || title === 'Unknown title') {
-    try {
-      const metadata = await getMediaMetadata(url);
-      if (duration === 0) duration = metadata.duration;
-      if (title === 'Unknown title' && metadata.title) title = metadata.title;
-    } catch (error) {
-      console.error('Download metadata lookup error:', error);
+  if (!knownMetadata || title === 'Unknown title') {
+    const metadataStartedAt = Date.now();
+    const fullUrl = url.startsWith('http') ? url : `https://${url}`;
+    const scraperMetadataPromise =
+      title === 'Unknown title'
+        ? Promise.resolve()
+            .then(() => {
+              // The scraper is only needed when no title came from the info request.
+              // eslint-disable-next-line @typescript-eslint/no-require-imports
+              const yt = require('@vreden/youtube_scraper') as {
+                metadata: (videoUrl: string) => Promise<YouTubeScraperMetadata>;
+              };
+              return yt.metadata(fullUrl);
+            })
+            .catch((error: unknown) => {
+              console.error('Download metadata lookup error:', error);
+              return null;
+            })
+        : Promise.resolve(null);
+    const ytDlpMetadataPromise =
+      duration === 0 || title === 'Unknown title'
+        ? getMediaMetadata(url).catch((error: unknown) => {
+            console.error('Download metadata lookup error:', error);
+            return null;
+          })
+        : Promise.resolve(null);
+    const [scraperMetadata, ytDlpMetadata] = await Promise.all([
+      scraperMetadataPromise,
+      ytDlpMetadataPromise,
+    ]);
+    console.info('YouTube tracking metadata timing', {
+      scraperRequested: title === 'Unknown title',
+      ytDlpRequested: duration === 0 || title === 'Unknown title',
+      totalMs: Date.now() - metadataStartedAt,
+    });
+
+    if (
+      title === 'Unknown title' &&
+      typeof scraperMetadata?.title === 'string' &&
+      scraperMetadata.title.trim()
+    ) {
+      title = scraperMetadata.title.trim();
+    }
+    if (duration === 0 && typeof ytDlpMetadata?.duration === 'number') {
+      duration = ytDlpMetadata.duration;
+    }
+    if (title === 'Unknown title' && ytDlpMetadata?.title) {
+      title = ytDlpMetadata.title;
     }
   }
 
@@ -98,6 +136,67 @@ function getOptionalUserId(request: NextRequest):
 
   if (session.response.status === 401) return {};
   return { response: session.response };
+}
+
+function getKnownYouTubeMetadata(
+  request: NextRequest,
+): { title?: string; duration?: number } | undefined {
+  const title = request.nextUrl.searchParams.get('title')?.trim();
+  const durationValue = request.nextUrl.searchParams.get('duration');
+  const duration = durationValue ? Number(durationValue) : undefined;
+
+  if ((!title || title.length > 500) && duration === undefined) return undefined;
+
+  return {
+    ...(title && title.length <= 500 ? { title } : {}),
+    ...(duration !== undefined && Number.isFinite(duration) && duration > 0
+      ? { duration }
+      : {}),
+  };
+}
+
+async function createNonYouTubeDownloadResponse(
+  url: string,
+  type: DownloadType,
+  userId?: string,
+): Promise<Response> {
+  const tempDir = path.join(os.tmpdir(), `vidly-${randomUUID()}`);
+  const tracking = getDownloadTracking(url, type, userId);
+
+  try {
+    fs.mkdirSync(tempDir, { recursive: true });
+    const downloaded = await downloadWithVidly(
+      url,
+      path.join(tempDir, 'video.mp4'),
+    );
+    const fileStats = fs.statSync(downloaded.filePath);
+    if (!fileStats.isFile() || fileStats.size === 0) {
+      throw new Error('Vidly did not create a valid video file.');
+    }
+
+    return createDirectFileResponse({
+      filePath: downloaded.filePath,
+      tempDir,
+      type,
+      fileSize: fileStats.size,
+      tracking,
+    });
+  } catch (error) {
+    try {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    } catch (cleanupError) {
+      console.error('Direct download cleanup error:', cleanupError);
+    }
+    await saveDownloadRecordDetails(tracking, type, 0, 'Failed');
+    console.error('Non-YouTube direct download error:', error);
+    return NextResponse.json(
+      {
+        success: false,
+        error: error instanceof Error ? error.message : 'Download failed',
+      },
+      { status: 502 },
+    );
+  }
 }
 
 export async function GET(request: NextRequest) {
@@ -167,6 +266,10 @@ export async function GET(request: NextRequest) {
     );
   }
 
+  if (platform !== 'YouTube') {
+    return createNonYouTubeDownloadResponse(url, type, session.userId);
+  }
+
   // 1. Create the job synchronously (fast — just a temp dir + Map entry)
   const job = createJob(platform === 'YouTube' ? type : 'mp4');
   job.userId = session.userId;
@@ -209,11 +312,20 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  if (platform !== 'YouTube') {
+    return createNonYouTubeDownloadResponse(url, type, session.userId);
+  }
+
   // 1. Create the job
   const job = createJob(platform === 'YouTube' ? type : 'mp4');
   job.userId = session.userId;
   job.platform = platform;
-  job.tracking = getDownloadTracking(url, type, session.userId);
+  job.tracking = getDownloadTracking(
+    url,
+    type,
+    session.userId,
+    platform === 'YouTube' ? getKnownYouTubeMetadata(request) : undefined,
+  );
 
   // 2. Start the download in the background
   void runDownloadJob(job, url);

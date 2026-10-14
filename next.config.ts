@@ -65,14 +65,14 @@ const scraperRuntimeIncludes = [
 
 const nextConfig: NextConfig = {
   serverExternalPackages: [
-    "@choewy/yt-dlp",
+    "youtube-dl-exec",
     "@vreden/youtube_scraper",
     "cheerio",
     "ffmpeg-static",
   ],
   outputFileTracingIncludes: {
     "/*": [
-      "node_modules/@choewy/yt-dlp/**/*",
+      "node_modules/youtube-dl-exec/bin/**/*",
       "node_modules/dasu/**/*",
       "node_modules/ffmpeg-static/**/*",
     ],

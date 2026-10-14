@@ -1,20 +1,18 @@
-import { spawn } from 'node:child_process';
 import fs from 'fs';
 import path from 'path';
-import {
-  YtDlpArgsBuilder,
-  YtDlpConfig,
-  YT_DLP_BIN_PATH,
-} from '@choewy/yt-dlp';
+import youtubeDl, { type Flags } from 'youtube-dl-exec';
 
 import type { DownloadJob } from './types';
-import {
-  DOWNLOAD_PROGRESS_MARKER,
-  MERGE_MIN_DISPLAY_MS,
-} from './constants';
+import { DOWNLOAD_PROGRESS_MARKER } from './constants';
 import { scheduleCleanup, scheduleErrorCleanup } from './job-store';
 import { saveDownloadRecord } from './records';
 import { downloadWithVidly } from './media-metadata';
+
+const DOWNLOAD_START_MARKER = '__YT_DLP_DOWNLOAD_START__';
+const MP4_FORMAT = 'bv*[vcodec^=avc1][ext=mp4]+ba[ext=m4a]/b[ext=mp4]/b';
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const ffmpegPath = require('ffmpeg-static') as string | null;
 
 export async function runDownloadJob(
   job: DownloadJob,
@@ -31,19 +29,33 @@ export async function runDownloadJob(
     job.type === 'mp3' ? 'audio.%(ext)s' : 'video.%(ext)s'
   );
 
-  const args = buildArgs(job, fullUrl, outputTemplate);
+  const flags = buildFlags(job, outputTemplate);
 
-  let stdout = '';
   let pendingStdoutLine = '';
   let pendingStderrLine = '';
   let stderrTail = '';
   let mergeStartedAt: number | undefined;
+  let processStartedAt: number | undefined;
+  let downloadStartedAt: number | undefined;
+  let firstProgressAt: number | undefined;
+  let downloadedFilePath: string | undefined;
 
   const handleLine = (rawLine: string) => {
     const line = rawLine.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '').trim();
+    if (line === DOWNLOAD_START_MARKER) {
+      downloadStartedAt ??= Date.now();
+      return;
+    }
+
+    if (line.startsWith('__YT_DLP_PATH__:')) {
+      downloadedFilePath = line.slice('__YT_DLP_PATH__:'.length).trim();
+      return;
+    }
+
     const markerIndex = line.indexOf(DOWNLOAD_PROGRESS_MARKER);
 
     if (markerIndex !== -1) {
+      firstProgressAt ??= Date.now();
       const [downloadedValue, estimatedValue, totalValue] = line
         .slice(markerIndex + DOWNLOAD_PROGRESS_MARKER.length)
         .split('|');
@@ -73,8 +85,7 @@ export async function runDownloadJob(
 
   const consumeOutput = (chunk: Buffer, isStdout: boolean) => {
     const text = chunk.toString();
-    if (isStdout) stdout += text;
-    else stderrTail = `${stderrTail}${text}`.slice(-4000);
+    if (!isStdout) stderrTail = `${stderrTail}${text}`.slice(-4000);
 
     const pendingLine = isStdout ? pendingStdoutLine : pendingStderrLine;
     const lines = `${pendingLine}${text}`.split(/\r\n|\n|\r/);
@@ -87,58 +98,81 @@ export async function runDownloadJob(
   };
 
   try {
-    const child = spawn(YT_DLP_BIN_PATH, args, {
-      stdio: ['ignore', 'pipe', 'pipe'],
+    processStartedAt = Date.now();
+    const subprocess = youtubeDl.exec(fullUrl, flags, {
+      windowsHide: true,
     });
 
-    child.stdout.on('data', (chunk: Buffer) =>
-      consumeOutput(chunk, true)
+    subprocess.stdout?.on('data', (chunk: Buffer) =>
+      consumeOutput(chunk, true),
     );
-    child.stderr.on('data', (chunk: Buffer) =>
-      consumeOutput(chunk, false)
+    subprocess.stderr?.on('data', (chunk: Buffer) =>
+      consumeOutput(chunk, false),
     );
 
-    await new Promise<void>((resolve, reject) => {
-      child.once('error', reject);
-      child.once('close', (code) => {
-        if (pendingStdoutLine) handleLine(pendingStdoutLine);
-        if (pendingStderrLine) handleLine(pendingStderrLine);
-        if (code === 0) resolve();
-        else reject(new Error(stderrTail || `yt-dlp exited with code ${code}`));
-      });
-    });
+    await subprocess;
+    if (pendingStdoutLine) handleLine(pendingStdoutLine);
+    if (pendingStderrLine) handleLine(pendingStderrLine);
 
-    if (job.stage !== 'merging') {
-      job.stage = 'merging';
-      mergeStartedAt = Date.now();
-    }
-
-    const mergeTimeLeft =
-      MERGE_MIN_DISPLAY_MS -
-      (Date.now() - (mergeStartedAt ?? Date.now()));
-    if (mergeTimeLeft > 0) {
-      await new Promise((resolve) => setTimeout(resolve, mergeTimeLeft));
-    }
-
-    const pathLine = stdout
-      .split(/\r?\n/)
-      .find((line) => line.startsWith('__YT_DLP_PATH__:'));
-    const filePath = pathLine?.slice('__YT_DLP_PATH__:'.length).trim();
+    const processCompletedAt = Date.now();
+    const filePath = downloadedFilePath;
 
     if (!filePath || !fs.existsSync(filePath)) {
       throw new Error('Downloaded file not found after merging');
     }
 
+    const fileStats = fs.statSync(filePath);
+    if (!fileStats.isFile() || fileStats.size === 0) {
+      throw new Error('Downloaded file is empty or invalid after merging');
+    }
+
     job.filePath = filePath;
-    job.size = fs.statSync(filePath).size;
+    job.size = fileStats.size;
     job.stage = 'ready';
     job.percent = 100;
+    const readyAt = Date.now();
+    const downloadPhaseStartedAt = downloadStartedAt ?? firstProgressAt;
+    console.info('YouTube download timing', {
+      jobId: job.id,
+      type: job.type,
+      extractionAndFormatSelectionMs:
+        processStartedAt !== undefined && downloadPhaseStartedAt !== undefined
+          ? downloadPhaseStartedAt - processStartedAt
+          : null,
+      timeToFirstProgressMs:
+        processStartedAt !== undefined && firstProgressAt !== undefined
+          ? firstProgressAt - processStartedAt
+          : null,
+      downloadMs:
+        downloadPhaseStartedAt !== undefined
+          ? (mergeStartedAt ?? processCompletedAt) - downloadPhaseStartedAt
+          : null,
+      mergeMs:
+        mergeStartedAt !== undefined
+          ? processCompletedAt - mergeStartedAt
+          : null,
+      totalMs:
+        processStartedAt !== undefined ? readyAt - processStartedAt : null,
+    });
     scheduleCleanup(job);
   } catch (error) {
-    console.error('Download preparation error:', error);
+    const stderr = stderrTail.trim();
+    const requiresYouTubeSignIn =
+      /LOGIN_REQUIRED|sign in to confirm.{0,40}not a bot/i.test(stderr);
+    const ytDlpErrorLine = stderr
+      .split(/\r?\n/)
+      .find((line) => /^\s*ERROR:/i.test(line))
+      ?.trim();
+
+    console.error('YouTube download preparation error:', {
+      jobId: job.id,
+      error,
+      stderr: stderr || 'yt-dlp did not write to stderr.',
+    });
     job.stage = 'error';
-    job.error =
-      error instanceof Error ? error.message : 'Download failed';
+    job.error = requiresYouTubeSignIn
+      ? 'YouTube requires sign-in verification for this video from the current server connection. Try again later; if it continues, the server may need an authorized YouTube session.'
+      : ytDlpErrorLine || 'yt-dlp could not download this video. Please try again later.';
     // Save failed attempts without replacing the original download error.
     void saveDownloadRecord(job, 'Failed');
     scheduleErrorCleanup(job);
@@ -176,33 +210,30 @@ async function runNonYouTubeDownloadJob(
   }
 }
 
-function buildArgs(
+function buildFlags(
   job: DownloadJob,
-  fullUrl: string,
   outputTemplate: string
-): string[] {
-  const argsBuilder = new YtDlpArgsBuilder(
-    new YtDlpConfig({
-      url: fullUrl,
-      output: outputTemplate,
-      mergeFormat: job.type === 'mp4' ? 'mp4' : undefined,
-      audioOnly: job.type === 'mp3',
-      audioFormat: job.type === 'mp3' ? 'mp3' : undefined,
-      concurrentFragments: 4,
-      quiet: false,
-      noProgress: false,
-    }).values()
-  );
-
-  const args = argsBuilder.video(outputTemplate);
-  const targetUrl = args.pop();
-
-  args.push(
-    '--newline',
-    '--progress-template',
-    `download:${DOWNLOAD_PROGRESS_MARKER}%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.total_bytes)s`,
-    targetUrl ?? fullUrl
-  );
-
-  return args;
+): Flags {
+  return {
+    output: outputTemplate,
+    format: job.type === 'mp4' ? MP4_FORMAT : 'ba/b',
+    ...(job.type === 'mp4' ? { mergeOutputFormat: 'mp4' } : {
+      extractAudio: true,
+      audioFormat: 'mp3',
+    }),
+    ...(ffmpegPath ? { ffmpegLocation: ffmpegPath } : {}),
+    noPlaylist: true,
+    forceOverwrites: true,
+    concurrentFragments: 4,
+    retries: 3,
+    fragmentRetries: 3,
+    quiet: false,
+    progress: true,
+    newline: true,
+    progressTemplate: `download:${DOWNLOAD_PROGRESS_MARKER}%(progress.downloaded_bytes)s|%(progress.total_bytes_estimate)s|%(progress.total_bytes)s`,
+    print: [
+      `before_dl:${DOWNLOAD_START_MARKER}`,
+      'after_move:__YT_DLP_PATH__:%(filepath)s',
+    ],
+  };
 }

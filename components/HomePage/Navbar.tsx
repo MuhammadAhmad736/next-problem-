@@ -81,7 +81,11 @@ const Navbar = () => {
           ? { name: result.user.name, email: result.user.email ?? "", isAdmin: result.user.isAdmin === true }
           : null);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        console.error(
+          "User session check failed. Check the /api/user/login server log for details.",
+          error,
+        );
         if (isCurrent) setUser(null);
       })
       .finally(() => {

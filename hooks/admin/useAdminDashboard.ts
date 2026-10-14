@@ -69,6 +69,17 @@ export function useAdminDashboard(
     return () => window.clearTimeout(timer)
   }, [loadDashboard])
 
+  useEffect(() => {
+    const refreshDashboard = () => {
+      if (document.visibilityState === "visible") {
+        void loadDashboard()
+      }
+    }
+
+    window.addEventListener("focus", refreshDashboard)
+    return () => window.removeEventListener("focus", refreshDashboard)
+  }, [loadDashboard])
+
   return {
     dashboardData,
     isLoading,

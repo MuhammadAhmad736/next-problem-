@@ -63,6 +63,10 @@ const scraperRuntimeIncludes = [
   "node_modules/yt-search/**/*",
 ];
 
+const youtubeDlRuntimeIncludes = [
+  "node_modules/youtube-dl-exec/bin/**/*",
+];
+
 const nextConfig: NextConfig = {
   serverExternalPackages: [
     "youtube-dl-exec",
@@ -76,8 +80,15 @@ const nextConfig: NextConfig = {
       "node_modules/dasu/**/*",
       "node_modules/ffmpeg-static/**/*",
     ],
-    "/api/media/info": scraperRuntimeIncludes,
-    "/api/media/download": scraperRuntimeIncludes,
+    "/api/media/info": [
+      ...scraperRuntimeIncludes,
+      ...youtubeDlRuntimeIncludes,
+    ],
+    "/api/media/download": [
+      ...scraperRuntimeIncludes,
+      ...youtubeDlRuntimeIncludes,
+      "node_modules/ffmpeg-static/**/*",
+    ],
     "/api/user/login": scraperRuntimeIncludes,
     "/api/visitors": scraperRuntimeIncludes,
   },

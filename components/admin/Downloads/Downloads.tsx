@@ -101,6 +101,17 @@ export default function Downloads({ data }: DownloadsProps) {
   const [error, setError] = useState("")
   const [retryCount, setRetryCount] = useState(0)
 
+  useEffect(() => {
+    const refreshDownloads = () => {
+      if (document.visibilityState === "visible") {
+        setRetryCount((count) => count + 1)
+      }
+    }
+
+    window.addEventListener("focus", refreshDownloads)
+    return () => window.removeEventListener("focus", refreshDownloads)
+  }, [])
+
   // Fetch downloads whenever the page changes or retry is requested.
   useEffect(() => {
     const controller = new AbortController()

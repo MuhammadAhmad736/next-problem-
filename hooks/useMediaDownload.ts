@@ -14,6 +14,7 @@ type UseMediaDownloadOptions = {
   metadataUrl: string;
   info: Info | null;
   setError: (message: string) => void;
+  onComplete: () => void;
 };
 
 export function useMediaDownload({
@@ -22,6 +23,7 @@ export function useMediaDownload({
   metadataUrl,
   info,
   setError,
+  onComplete,
 }: UseMediaDownloadOptions) {
   const [downloading, setDownloading] = useState<DownloadType | null>(null);
   const [downloadProgress, setDownloadProgress] =
@@ -149,6 +151,7 @@ export function useMediaDownload({
           size: transferredBytes,
         });
         toast.success("Download completed successfully.");
+        onComplete();
         setTimeout(() => setDownloadProgress(null), 4000);
         return;
       }
@@ -194,6 +197,7 @@ export function useMediaDownload({
         if (progress.stage === "complete") {
           iframe?.remove();
           toast.success("Download completed successfully.");
+          onComplete();
           setTimeout(() => setDownloadProgress(null), 4000);
           break;
         }

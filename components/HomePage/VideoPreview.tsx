@@ -5,6 +5,7 @@ import { toast } from "react-toastify";
 import { useMediaDownload } from "../../hooks/useMediaDownload";
 import { useMediaMetadata } from "../../hooks/useMediaMetadata";
 import { useTranscript } from "../../hooks/useTranscript";
+import ReviewModal from "./ReviewModal";
 import SkeletonCard from "../video-preview/SkeletonCard";
 import VideoPreviewCard from "../video-preview/VideoPreviewCard";
 import VideoSearchBar from "../video-preview/VideoSearchBar";
@@ -14,6 +15,7 @@ import { getYouTubeId } from "../video-preview/utils";
 export default function VideoPreview() {
   const [url, setUrl] = useState("");
   const [playing, setPlaying] = useState(false);
+  const [showReviewModal, setShowReviewModal] = useState(false);
   const metadata = useMediaMetadata();
   const downloads = useMediaDownload({
     url,
@@ -21,6 +23,7 @@ export default function VideoPreview() {
     metadataUrl: metadata.metadataUrl,
     info: metadata.info,
     setError: metadata.setError,
+    onComplete: () => setShowReviewModal(true),
   });
   const transcripts = useTranscript({
     url,
@@ -120,6 +123,10 @@ export default function VideoPreview() {
             void downloads.handleDownload(type)
           }
         />
+      )}
+
+      {showReviewModal && (
+        <ReviewModal onClose={() => setShowReviewModal(false)} />
       )}
     </div>
   );

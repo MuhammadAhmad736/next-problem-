@@ -97,6 +97,18 @@ const Navbar = () => {
     };
   }, []);
 
+  useEffect(() => {
+    const openLoginModal = () => {
+      setAuthError("");
+      setAuthMode("login");
+      setIsAccountMenuOpen(false);
+    };
+
+    window.addEventListener("media-converter:request-login", openLoginModal);
+    return () =>
+      window.removeEventListener("media-converter:request-login", openLoginModal);
+  }, []);
+
   const handleAuthSubmit = async (credentials: UserAuthCredentials) => {
     if (!authMode) return;
 

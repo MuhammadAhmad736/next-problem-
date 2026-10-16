@@ -64,7 +64,9 @@ const scraperRuntimeIncludes = [
 ];
 
 const youtubeDlRuntimeIncludes = [
-  "node_modules/youtube-dl-exec/bin/**/*",
+  process.platform === "win32"
+    ? "node_modules/youtube-dl-exec/bin/yt-dlp.exe"
+    : "node_modules/youtube-dl-exec/bin/yt-dlp",
 ];
 
 const nextConfig: NextConfig = {
@@ -76,7 +78,6 @@ const nextConfig: NextConfig = {
   ],
   outputFileTracingIncludes: {
     "/*": [
-      "node_modules/youtube-dl-exec/bin/**/*",
       "node_modules/dasu/**/*",
       "node_modules/ffmpeg-static/**/*",
     ],
